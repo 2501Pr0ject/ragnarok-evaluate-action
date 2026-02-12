@@ -1,0 +1,308 @@
+name: 'RAGnarok Evaluate'
+description: 'Evaluate your RAG pipeline quality with RAGnarok-AI. Advisory feedback, not blocking by default.'
+author: 'RAGnarok-AI'
+branding:
+  icon: 'check-circle'
+  color: 'green'
+
+inputs:
+  config:
+    description: 'Path to ragnarok.yaml config file'
+    required: false
+    default: ''
+  testset:
+    description: 'Path to testset JSON file (alternative to config)'
+    required: false
+    default: ''
+  threshold:
+    description: 'Quality threshold (0.0-1.0). Scores below trigger a warning or failure.'
+    required: false
+    default: '0.7'
+  fail-on-threshold:
+    description: 'If true, fail the workflow when score is below threshold. Default: false (advisory only).'
+    required: false
+    default: 'false'
+  comment-on-pr:
+    description: 'Post evaluation results as a PR comment. Default: true.'
+    required: false
+    default: 'true'
+  demo:
+    description: 'Run demo evaluation (for testing the action).'
+    required: false
+    default: 'false'
+  python-version:
+    description: 'Python version to use.'
+    required: false
+    default: '3.10'
+  ragnarok-version:
+    description: 'RAGnarok-AI version to install (e.g., "1.4.0" or "latest").'
+    required: false
+    default: 'latest'
+
+outputs:
+  score:
+    description: 'Overall evaluation score (0.0-1.0)'
+    value: ${{ steps.evaluate.outputs.score }}
+  status:
+    description: 'Evaluation status: pass, review, or fail'
+    value: ${{ steps.evaluate.outputs.status }}
+  report:
+    description: 'Full evaluation report (JSON)'
+    value: ${{ steps.evaluate.outputs.report }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ inputs.python-version }}
+
+    - name: Install RAGnarok-AI
+      shell: bash
+      run: |
+        if [ "${{ inputs.ragnarok-version }}" = "latest" ]; then
+          pip install ragnarok-ai
+        else
+          pip install ragnarok-ai==${{ inputs.ragnarok-version }}
+        fi
+
+    - name: Run evaluation
+      id: evaluate
+      shell: bash
+      env:
+        INPUT_CONFIG: ${{ inputs.config }}
+        INPUT_TESTSET: ${{ inputs.testset }}
+        INPUT_THRESHOLD: ${{ inputs.threshold }}
+        INPUT_DEMO: ${{ inputs.demo }}
+      run: |
+        set +e  # Don't exit on error
+
+        # Build command
+        CMD="ragnarok --json evaluate"
+
+        if [ "$INPUT_DEMO" = "true" ]; then
+          CMD="$CMD --demo --limit 5"
+        elif [ -n "$INPUT_CONFIG" ]; then
+          CMD="$CMD --config $INPUT_CONFIG"
+        elif [ -n "$INPUT_TESTSET" ]; then
+          CMD="$CMD --testset $INPUT_TESTSET"
+        else
+          echo "::error::Either 'config', 'testset', or 'demo' must be provided"
+          exit 1
+        fi
+
+        # Run evaluation
+        echo "Running: $CMD"
+        RESULT=$($CMD 2>&1)
+        EXIT_CODE=$?
+
+        echo "Exit code: $EXIT_CODE"
+        echo "$RESULT"
+
+        # Save full report
+        echo "report<<EOF" >> $GITHUB_OUTPUT
+        echo "$RESULT" >> $GITHUB_OUTPUT
+        echo "EOF" >> $GITHUB_OUTPUT
+
+        # Parse metrics from JSON
+        PRECISION=$(echo "$RESULT" | jq -r '.data.metrics["precision@10"] // .data.metrics.precision // "N/A"' 2>/dev/null || echo "N/A")
+        RECALL=$(echo "$RESULT" | jq -r '.data.metrics["recall@10"] // .data.metrics.recall // "N/A"' 2>/dev/null || echo "N/A")
+        MRR=$(echo "$RESULT" | jq -r '.data.metrics.mrr // "N/A"' 2>/dev/null || echo "N/A")
+        NDCG=$(echo "$RESULT" | jq -r '.data.metrics["ndcg@10"] // .data.metrics.ndcg // "N/A"' 2>/dev/null || echo "N/A")
+
+        # LLM-as-Judge metrics (if available)
+        FAITHFULNESS=$(echo "$RESULT" | jq -r '.data.metrics.faithfulness // "N/A"' 2>/dev/null || echo "N/A")
+        RELEVANCE=$(echo "$RESULT" | jq -r '.data.metrics.relevance // "N/A"' 2>/dev/null || echo "N/A")
+        HALLUCINATION=$(echo "$RESULT" | jq -r '.data.metrics.hallucination // "N/A"' 2>/dev/null || echo "N/A")
+
+        echo "precision=$PRECISION" >> $GITHUB_OUTPUT
+        echo "recall=$RECALL" >> $GITHUB_OUTPUT
+        echo "mrr=$MRR" >> $GITHUB_OUTPUT
+        echo "ndcg=$NDCG" >> $GITHUB_OUTPUT
+        echo "faithfulness=$FAITHFULNESS" >> $GITHUB_OUTPUT
+        echo "relevance=$RELEVANCE" >> $GITHUB_OUTPUT
+        echo "hallucination=$HALLUCINATION" >> $GITHUB_OUTPUT
+
+        # Calculate overall score (average of retrieval metrics)
+        if [ "$PRECISION" != "N/A" ] && [ "$RECALL" != "N/A" ]; then
+          SCORE=$(echo "scale=2; ($PRECISION + $RECALL) / 2" | bc -l 2>/dev/null || echo "0")
+        else
+          SCORE="0"
+        fi
+        echo "score=$SCORE" >> $GITHUB_OUTPUT
+
+        # Determine status based on threshold
+        THRESHOLD="${INPUT_THRESHOLD:-0.7}"
+        if (( $(echo "$SCORE >= $THRESHOLD" | bc -l 2>/dev/null || echo "0") )); then
+          echo "status=pass" >> $GITHUB_OUTPUT
+        else
+          echo "status=review" >> $GITHUB_OUTPUT
+        fi
+
+    - name: Generate PR comment
+      if: inputs.comment-on-pr == 'true' && github.event_name == 'pull_request'
+      id: comment
+      shell: bash
+      env:
+        SCORE: ${{ steps.evaluate.outputs.score }}
+        STATUS: ${{ steps.evaluate.outputs.status }}
+        THRESHOLD: ${{ inputs.threshold }}
+        PRECISION: ${{ steps.evaluate.outputs.precision }}
+        RECALL: ${{ steps.evaluate.outputs.recall }}
+        MRR: ${{ steps.evaluate.outputs.mrr }}
+        NDCG: ${{ steps.evaluate.outputs.ndcg }}
+        FAITHFULNESS: ${{ steps.evaluate.outputs.faithfulness }}
+        RELEVANCE: ${{ steps.evaluate.outputs.relevance }}
+        HALLUCINATION: ${{ steps.evaluate.outputs.hallucination }}
+        REPORT: ${{ steps.evaluate.outputs.report }}
+      run: |
+        # Helper function to get status icon
+        get_status() {
+          local value=$1
+          local threshold=$2
+          if [ "$value" = "N/A" ]; then
+            echo "-"
+          elif (( $(echo "$value >= $threshold" | bc -l 2>/dev/null || echo "0") )); then
+            echo "✓"
+          else
+            echo "⚠️"
+          fi
+        }
+
+        # Create comment body
+        cat << 'COMMENT_HEADER' > /tmp/pr_comment.md
+        ## RAGnarok Evaluation Report
+
+        COMMENT_HEADER
+
+        # Retrieval Metrics section
+        echo "**Retrieval Metrics** *(deterministic)*" >> /tmp/pr_comment.md
+        echo "" >> /tmp/pr_comment.md
+        echo "| Metric | Score | Status |" >> /tmp/pr_comment.md
+        echo "|--------|-------|--------|" >> /tmp/pr_comment.md
+
+        if [ "$PRECISION" != "N/A" ]; then
+          PSTATUS=$(get_status "$PRECISION" "$THRESHOLD")
+          echo "| Precision | $PRECISION | $PSTATUS |" >> /tmp/pr_comment.md
+        fi
+        if [ "$RECALL" != "N/A" ]; then
+          RSTATUS=$(get_status "$RECALL" "$THRESHOLD")
+          echo "| Recall | $RECALL | $RSTATUS |" >> /tmp/pr_comment.md
+        fi
+        if [ "$MRR" != "N/A" ]; then
+          MSTATUS=$(get_status "$MRR" "$THRESHOLD")
+          echo "| MRR | $MRR | $MSTATUS |" >> /tmp/pr_comment.md
+        fi
+        if [ "$NDCG" != "N/A" ]; then
+          NSTATUS=$(get_status "$NDCG" "$THRESHOLD")
+          echo "| NDCG | $NDCG | $NSTATUS |" >> /tmp/pr_comment.md
+        fi
+
+        # LLM-as-Judge section (only if metrics available)
+        if [ "$FAITHFULNESS" != "N/A" ] || [ "$RELEVANCE" != "N/A" ] || [ "$HALLUCINATION" != "N/A" ]; then
+          echo "" >> /tmp/pr_comment.md
+          echo "**Generation Quality** *(LLM-as-Judge, advisory)*" >> /tmp/pr_comment.md
+          echo "" >> /tmp/pr_comment.md
+          echo "| Metric | Score | Status |" >> /tmp/pr_comment.md
+          echo "|--------|-------|--------|" >> /tmp/pr_comment.md
+
+          if [ "$FAITHFULNESS" != "N/A" ]; then
+            FSTATUS=$(get_status "$FAITHFULNESS" "$THRESHOLD")
+            echo "| Faithfulness | $FAITHFULNESS | $FSTATUS |" >> /tmp/pr_comment.md
+          fi
+          if [ "$RELEVANCE" != "N/A" ]; then
+            RSTATUS=$(get_status "$RELEVANCE" "$THRESHOLD")
+            echo "| Relevance | $RELEVANCE | $RSTATUS |" >> /tmp/pr_comment.md
+          fi
+          if [ "$HALLUCINATION" != "N/A" ]; then
+            HSTATUS=$(get_status "$HALLUCINATION" "$THRESHOLD")
+            echo "| Hallucination | $HALLUCINATION | $HSTATUS |" >> /tmp/pr_comment.md
+          fi
+        fi
+
+        # Summary
+        echo "" >> /tmp/pr_comment.md
+        if [ "$STATUS" = "pass" ]; then
+          echo "Retrieval metrics look good." >> /tmp/pr_comment.md
+        else
+          echo "RAGnarok suggests reviewing the scores below threshold ($THRESHOLD)." >> /tmp/pr_comment.md
+        fi
+
+        # Footer
+        echo "" >> /tmp/pr_comment.md
+        echo "---" >> /tmp/pr_comment.md
+        echo "*Note: LLM-as-Judge scores are advisory, not definitive. Review recommended.*" >> /tmp/pr_comment.md
+        echo "" >> /tmp/pr_comment.md
+        echo "<details>" >> /tmp/pr_comment.md
+        echo "<summary>Full Report (JSON)</summary>" >> /tmp/pr_comment.md
+        echo "" >> /tmp/pr_comment.md
+        echo '```json' >> /tmp/pr_comment.md
+        echo "$REPORT" | jq '.' >> /tmp/pr_comment.md 2>/dev/null || echo "$REPORT" >> /tmp/pr_comment.md
+        echo '```' >> /tmp/pr_comment.md
+        echo "</details>" >> /tmp/pr_comment.md
+
+        # Save comment body for next step
+        {
+          echo "body<<COMMENT_EOF"
+          cat /tmp/pr_comment.md
+          echo "COMMENT_EOF"
+        } >> $GITHUB_OUTPUT
+
+    - name: Post PR comment
+      if: inputs.comment-on-pr == 'true' && github.event_name == 'pull_request'
+      uses: actions/github-script@v7
+      with:
+        script: |
+          const body = `${{ steps.comment.outputs.body }}`;
+
+          // Find existing RAGnarok comment
+          const comments = await github.rest.issues.listComments({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            issue_number: context.issue.number,
+          });
+
+          const ragnarokComment = comments.data.find(c =>
+            c.body.includes('## RAGnarok Evaluation Report')
+          );
+
+          if (ragnarokComment) {
+            // Update existing comment
+            await github.rest.issues.updateComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              comment_id: ragnarokComment.id,
+              body: body
+            });
+          } else {
+            // Create new comment
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: body
+            });
+          }
+
+    - name: Check threshold
+      if: inputs.fail-on-threshold == 'true'
+      shell: bash
+      env:
+        STATUS: ${{ steps.evaluate.outputs.status }}
+        SCORE: ${{ steps.evaluate.outputs.score }}
+        THRESHOLD: ${{ inputs.threshold }}
+      run: |
+        if [ "$STATUS" = "review" ]; then
+          echo "::warning::RAGnarok suggests reviewing: score ($SCORE) is below threshold ($THRESHOLD)"
+          exit 1
+        fi
+
+    - name: Advisory notice
+      if: inputs.fail-on-threshold == 'false' && steps.evaluate.outputs.status == 'review'
+      shell: bash
+      env:
+        SCORE: ${{ steps.evaluate.outputs.score }}
+        THRESHOLD: ${{ inputs.threshold }}
+      run: |
+        echo "::warning::RAGnarok suggests reviewing: score ($SCORE) is below threshold ($THRESHOLD). This is advisory only."
