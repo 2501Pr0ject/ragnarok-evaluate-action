@@ -35,9 +35,21 @@ inputs:
     required: false
     default: '3.10'
   ragnarok-version:
-    description: 'RAGnarok-AI version to install (e.g., "1.4.0" or "latest").'
+    description: 'RAGnarok-AI version to install (e.g., "1.4.1" or "latest").'
     required: false
     default: 'latest'
+  dataset-baseline:
+    description: 'Path to baseline testset for diff comparison. If provided, fails when dataset has changed.'
+    required: false
+    default: ''
+  dataset-current:
+    description: 'Path to current testset for diff comparison (used with dataset-baseline).'
+    required: false
+    default: ''
+  fail-on-dataset-change:
+    description: 'If true, fail the workflow when dataset differs from baseline. Default: true when dataset-baseline is set.'
+    required: false
+    default: 'true'
 
 outputs:
   score:
@@ -49,6 +61,12 @@ outputs:
   report:
     description: 'Full evaluation report (JSON)'
     value: ${{ steps.evaluate.outputs.report }}
+  dataset-changed:
+    description: 'Whether the dataset changed from baseline (true/false)'
+    value: ${{ steps.dataset-diff.outputs.changed }}
+  dataset-diff-summary:
+    description: 'Summary of dataset changes (added/removed/modified counts)'
+    value: ${{ steps.dataset-diff.outputs.summary }}
 
 runs:
   using: 'composite'
@@ -65,6 +83,57 @@ runs:
           pip install ragnarok-ai
         else
           pip install ragnarok-ai==${{ inputs.ragnarok-version }}
+        fi
+
+    - name: Check dataset changes
+      id: dataset-diff
+      if: inputs.dataset-baseline != ''
+      shell: bash
+      env:
+        BASELINE: ${{ inputs.dataset-baseline }}
+        CURRENT: ${{ inputs.dataset-current || inputs.testset }}
+        FAIL_ON_CHANGE: ${{ inputs.fail-on-dataset-change }}
+      run: |
+        set +e
+
+        if [ -z "$CURRENT" ]; then
+          echo "::error::dataset-current or testset must be provided when using dataset-baseline"
+          exit 1
+        fi
+
+        if [ ! -f "$BASELINE" ]; then
+          echo "::warning::Baseline file not found: $BASELINE. Skipping diff (first run?)."
+          echo "changed=false" >> $GITHUB_OUTPUT
+          echo "summary=No baseline found" >> $GITHUB_OUTPUT
+          exit 0
+        fi
+
+        echo "Comparing datasets:"
+        echo "  Baseline: $BASELINE"
+        echo "  Current:  $CURRENT"
+
+        RESULT=$(ragnarok --json dataset diff "$BASELINE" "$CURRENT" 2>&1)
+        EXIT_CODE=$?
+
+        echo "$RESULT"
+
+        # Parse diff results
+        HAS_CHANGES=$(echo "$RESULT" | jq -r '.data.has_changes // false' 2>/dev/null || echo "false")
+        ADDED=$(echo "$RESULT" | jq -r '.data.summary.added // 0' 2>/dev/null || echo "0")
+        REMOVED=$(echo "$RESULT" | jq -r '.data.summary.removed // 0' 2>/dev/null || echo "0")
+        MODIFIED=$(echo "$RESULT" | jq -r '.data.summary.modified // 0' 2>/dev/null || echo "0")
+
+        echo "changed=$HAS_CHANGES" >> $GITHUB_OUTPUT
+        echo "summary=+$ADDED -$REMOVED ~$MODIFIED" >> $GITHUB_OUTPUT
+
+        if [ "$HAS_CHANGES" = "true" ]; then
+          echo "::warning::Dataset has changed from baseline: +$ADDED added, -$REMOVED removed, ~$MODIFIED modified"
+          if [ "$FAIL_ON_CHANGE" = "true" ]; then
+            echo "::error::Dataset changed and fail-on-dataset-change is enabled"
+            exit 1
+          fi
+        else
+          echo "Dataset unchanged from baseline."
         fi
 
     - name: Run evaluation
