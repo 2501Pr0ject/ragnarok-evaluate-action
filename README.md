@@ -60,16 +60,8 @@ The action posts a comment distinguishing deterministic vs advisory metrics:
 | Precision | 0.82 | OK |
 | Recall | 0.75 | OK |
 
-**Generation Quality** *(LLM-as-Judge, advisory)*
-| Metric | Score | Status |
-|--------|-------|--------|
-| Faithfulness | 0.68 | Review |
-| Relevance | 0.72 | Review |
-
 RAGnarok suggests reviewing the scores below threshold (0.7).
 
----
-*Note: LLM-as-Judge scores are advisory, not definitive. Review recommended.*
 ```
 
 ## Examples
@@ -156,8 +148,8 @@ criteria:
 
 This action follows RAGnarok-AI's **humble evaluation** approach:
 
-- **Retrieval metrics** (Precision, Recall, MRR, NDCG) are deterministic and reliable
-- **LLM-as-Judge metrics** (Faithfulness, Relevance, Hallucination) are advisory
+- **Retrieval metrics** (Precision, Recall, MRR, NDCG) are deterministic and reliable; they are what this action reports
+- **LLM-as-Judge metrics** (Faithfulness, Relevance, Hallucination) are advisory and are not produced by `ragnarok evaluate`; run `ragnarok judge` separately when you need them
 - Default behavior is **warning, not blocking** — you decide when to enforce
 - PR comments clearly distinguish what's definitive vs what needs human review
 

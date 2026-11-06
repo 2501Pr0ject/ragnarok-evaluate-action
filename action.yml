@@ -180,18 +180,10 @@ runs:
         MRR=$(echo "$RESULT" | jq -r '.data.metrics.mrr // "N/A"' 2>/dev/null || echo "N/A")
         NDCG=$(echo "$RESULT" | jq -r '.data.metrics["ndcg@10"] // .data.metrics.ndcg // "N/A"' 2>/dev/null || echo "N/A")
 
-        # LLM-as-Judge metrics (if available)
-        FAITHFULNESS=$(echo "$RESULT" | jq -r '.data.metrics.faithfulness // "N/A"' 2>/dev/null || echo "N/A")
-        RELEVANCE=$(echo "$RESULT" | jq -r '.data.metrics.relevance // "N/A"' 2>/dev/null || echo "N/A")
-        HALLUCINATION=$(echo "$RESULT" | jq -r '.data.metrics.hallucination // "N/A"' 2>/dev/null || echo "N/A")
-
         echo "precision=$PRECISION" >> $GITHUB_OUTPUT
         echo "recall=$RECALL" >> $GITHUB_OUTPUT
         echo "mrr=$MRR" >> $GITHUB_OUTPUT
         echo "ndcg=$NDCG" >> $GITHUB_OUTPUT
-        echo "faithfulness=$FAITHFULNESS" >> $GITHUB_OUTPUT
-        echo "relevance=$RELEVANCE" >> $GITHUB_OUTPUT
-        echo "hallucination=$HALLUCINATION" >> $GITHUB_OUTPUT
 
         # Calculate overall score (average of retrieval metrics)
         if [ "$PRECISION" != "N/A" ] && [ "$RECALL" != "N/A" ]; then
@@ -221,9 +213,6 @@ runs:
         RECALL: ${{ steps.evaluate.outputs.recall }}
         MRR: ${{ steps.evaluate.outputs.mrr }}
         NDCG: ${{ steps.evaluate.outputs.ndcg }}
-        FAITHFULNESS: ${{ steps.evaluate.outputs.faithfulness }}
-        RELEVANCE: ${{ steps.evaluate.outputs.relevance }}
-        HALLUCINATION: ${{ steps.evaluate.outputs.hallucination }}
         REPORT: ${{ steps.evaluate.outputs.report }}
       run: |
         # Helper function to get status icon
@@ -268,28 +257,6 @@ runs:
           echo "| NDCG | $NDCG | $NSTATUS |" >> /tmp/pr_comment.md
         fi
 
-        # LLM-as-Judge section (only if metrics available)
-        if [ "$FAITHFULNESS" != "N/A" ] || [ "$RELEVANCE" != "N/A" ] || [ "$HALLUCINATION" != "N/A" ]; then
-          echo "" >> /tmp/pr_comment.md
-          echo "**Generation Quality** *(LLM-as-Judge, advisory)*" >> /tmp/pr_comment.md
-          echo "" >> /tmp/pr_comment.md
-          echo "| Metric | Score | Status |" >> /tmp/pr_comment.md
-          echo "|--------|-------|--------|" >> /tmp/pr_comment.md
-
-          if [ "$FAITHFULNESS" != "N/A" ]; then
-            FSTATUS=$(get_status "$FAITHFULNESS" "$THRESHOLD")
-            echo "| Faithfulness | $FAITHFULNESS | $FSTATUS |" >> /tmp/pr_comment.md
-          fi
-          if [ "$RELEVANCE" != "N/A" ]; then
-            RSTATUS=$(get_status "$RELEVANCE" "$THRESHOLD")
-            echo "| Relevance | $RELEVANCE | $RSTATUS |" >> /tmp/pr_comment.md
-          fi
-          if [ "$HALLUCINATION" != "N/A" ]; then
-            HSTATUS=$(get_status "$HALLUCINATION" "$THRESHOLD")
-            echo "| Hallucination | $HALLUCINATION | $HSTATUS |" >> /tmp/pr_comment.md
-          fi
-        fi
-
         # Summary
         echo "" >> /tmp/pr_comment.md
         if [ "$STATUS" = "pass" ]; then
@@ -301,7 +268,6 @@ runs:
         # Footer
         echo "" >> /tmp/pr_comment.md
         echo "---" >> /tmp/pr_comment.md
-        echo "*Note: LLM-as-Judge scores are advisory, not definitive. Review recommended.*" >> /tmp/pr_comment.md
         echo "" >> /tmp/pr_comment.md
         echo "<details>" >> /tmp/pr_comment.md
         echo "<summary>Full Report (JSON)</summary>" >> /tmp/pr_comment.md
